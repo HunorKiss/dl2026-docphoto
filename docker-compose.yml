@@ -40,3 +40,21 @@ services:
       --LabApp.extension_manager='readonly'
     ports:
       - "8888:8888"
+
+  # Lab 4 has its own self-contained source tree under lab4/. Serve it from
+  # there with lab4 as the import root, so `from src... import ...` resolves to
+  # lab4/src and never to the lab-3 copy at the repo root. Different port so it
+  # can run alongside the lab-3 server above.
+  lab4:
+    <<: *common
+    working_dir: /workspace/lab4
+    environment:
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      WANDB_MODE: ${WANDB_MODE:-online}
+      PYTHONPATH: /workspace/lab4
+    command: >
+      jupyter lab --ip=0.0.0.0 --port=8889 --no-browser
+      --ServerApp.token='' --ServerApp.password=''
+      --LabApp.extension_manager='readonly'
+    ports:
+      - "8889:8889"
