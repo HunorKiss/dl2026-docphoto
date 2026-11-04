@@ -1,0 +1,29 @@
+# Overlay that gives the containers the NVIDIA GPU. Without it everything
+# still runs, on the CPU. Docker Compose does not read this file on its own;
+# use ONE of the two ways below, not both.
+#
+# A) Once, in .env (recommended). Uncomment the COMPOSE_FILE line for your
+#    operating system in .env; from then on every plain command uses the GPU:
+#      docker compose run --rm dev python -m src.train --fold 0
+#
+# B) Every time, on the command line. Leave .env alone and name both files in
+#    each command, before `run`:
+#      docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm dev python -m src.train --fold 0
+#
+# To check that it worked: docker compose run --rm dev python scripts/check_env.py
+# (with B, again with the two -f flags) should print a `gpu` line with its name.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  dev:
+    <<: *gpu
+  lab:
+    <<: *gpu

@@ -1,0 +1,35 @@
+# The reference solution of the Snap or Retake: Document Photo Usability competition:
+# lab 4's network with a setting from lab 4 that works well enough, trained on all the data.
+# Copy this file to try something: python -m src.train --config configs/my_try.yaml
+# Every number that changes the result is here; the command line only picks the fold.
+
+seed: 42
+
+data:
+  raw: data/raw                  # train.csv, train/, test/, sample_submission.csv
+  work: data/work/reference      # resized copies, written by prepare.py
+  cache_size: 1024               # long side of the resized copies
+  image_size: 768                # the network sees a grey square of this size, page letterboxed
+
+split:
+  column: group_strict           # never split at random: see the README
+  n_folds: 4                     # the 6 strict units of the training set in 4 folds
+
+model:
+  widths: [8, 16, 32, 64]        # the stem's width, then one conv-pool block per further width
+  stem_stride: 4
+  stem_kernel: 7
+  dropout: 0.0
+
+train:
+  epochs: 12
+  batch_size: 32
+  lr: 2.0e-3
+  weight_decay: 0.05             # AdamW, on weights only; biases and norms get none
+  warmup: 0.1                    # fraction of the steps with a linearly rising learning rate
+  max_shift: 16                  # augmentation: mirror and shift only, never blur or brightness
+  amp: true                      # bfloat16 on a GPU that supports it, ignored elsewhere
+  num_workers: 4
+
+wandb:
+  project: snap-or-retake        # where train.py logs; WANDB_MODE in .env turns it offline or off
