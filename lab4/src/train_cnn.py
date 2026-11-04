@@ -67,6 +67,22 @@ def fingerprint_or_note() -> dict:
         return {"missing": f"{type(e).__name__}: src.repro.fingerprint (lab 5, TASK 4)"}
 
 
+def pick_device() -> str:
+    """The best device available: CUDA, then Apple MPS (the Mac GPU), then CPU.
+
+    MPS is PyTorch's Metal backend; it runs only in a native-arch macOS
+    process, never inside a Linux container. The CUDA-only fast paths below
+    (channels_last, bf16 autocast, torch.compile) are deliberately not taken
+    on MPS, where they are unsupported or unstable; plain float32 on MPS is
+    still far faster than emulated CPU.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def amp_context(device: str, amp: str):
     """bf16 autocast on a GPU when asked for; full precision everywhere else."""
     if amp == "bf16" and device == "cuda":
@@ -226,7 +242,7 @@ def train_model(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarra
     predictions of the selected epoch, the model, the loss, the checkpoint
     path, the W&B page, the learning rate of every step and the report table.
     """
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or pick_device()
     name = name or cfg["name"]
     set_seed(cfg["seed"])
     tr = cfg["train"]
@@ -346,7 +362,7 @@ def lr_range_test(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndar
     one at the bottom of the smoothed curve. Returns the curve and that
     suggestion. One W&B run (job_type lr_range_test).
     """
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or pick_device()
     set_seed(cfg["seed"])
     tr = cfg["train"]
     y_t = torch.from_numpy(df[config.TARGET].to_numpy().astype(np.float32))
