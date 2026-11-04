@@ -1,8 +1,11 @@
+# Root .gitignore. The per-lab infrastructure (Dockerfile, compose,
+# requirements, lab-specific .gitignore) now lives under lab4/ and lab3/;
+# this file protects the repository root so that data, caches, checkpoints
+# and editor scratch never get committed from any lab directory.
+
 # Data never goes in git. It is large, it is regenerable, and it makes the
-# repository unusable for everyone else. Keep the directory, ignore the content.
-# The patterns are anchored with **/ so they also cover the per-lab copies
-# (lab3/data/..., lab4/data/...) created when the project was reorganised, not
-# only the repo-root data/.
+# repository unusable for everyone else. Covers the repo root and every
+# per-lab copy (lab3/data/..., lab4/data/...).
 data/raw/*
 data/work/*
 **/data/raw/*
@@ -20,45 +23,23 @@ models/*
 *.joblib
 *.pkl
 
-# Generated output
-submissions/*
-!submissions/.gitkeep
-*.log
+# Large array / cache formats, wherever they land
+*.npy
+*.npz
 
-# Python
-__pycache__/
-*.py[cod]
-.Python
-build/
-dist/
-*.egg-info/
-.venv/
-venv/
-env/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-
-# Notebooks: strip output before committing, and never commit checkpoints
-.ipynb_checkpoints/
-
-# Editors and OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-
-# Secrets. Kaggle tokens and API keys do not belong in a public repository.
-.env
-kaggle.json
-
-# Model and dataset caches that torch and huggingface download into the project
-.cache/
-
-# Weights & Biases local run directory
+# Weights & Biases local runs
 wandb/
+**/wandb/
 
-# JupyterLab real-time-collaboration scratch copies
+# Secrets
+.env
+**/.env
+
+# Editor / OS / Jupyter scratch
+.DS_Store
+**/.DS_Store
+**/.ipynb_checkpoints/
 **/.virtual_documents/
+__pycache__/
+**/__pycache__/
+*.pyc
