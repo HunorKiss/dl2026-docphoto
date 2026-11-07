@@ -1,0 +1,34 @@
+# Experiment: an ImageNet-pretrained EfficientNet-B0 with a regression head,
+# instead of the from-scratch SmallCNN. The backbone brings edge and texture
+# detectors that the 1841-image reference has to learn from nothing.
+# python -m src.train --fold 0 --config configs/effnet_b0.yaml --out models/effnet_b0
+seed: 42
+
+data:
+  raw: data/raw
+  work: data/work/reference      # same 1024 px resize cache as the reference; no re-prepare needed
+  cache_size: 1024
+  image_size: 768
+
+split:
+  column: group_strict
+  n_folds: 4
+
+model:
+  type: effnet_b0                # small_cnn | effnet_b0
+  dropout: 0.2
+  pretrained: true
+
+train:
+  epochs: 12
+  freeze_epochs: 6               # train the head only for this many epochs, then fine-tune the whole net
+  batch_size: 8                  # 16 GB unified memory: effnet-b0 at 768 px fits at 8, OOMs higher
+  lr: 1.0e-4                     # small lr: fine-tuning pretrained weights; 5e-4 made the loss blow up to inf on MPS
+  weight_decay: 0.05
+  warmup: 0.2                    # longer warm-up so the first fine-tuning steps stay stable
+  max_shift: 16
+  amp: true
+  num_workers: 0                 # workers hold extra RAM copies and are unstable with MPS+fork; 0 is safest on 16 GB
+
+wandb:
+  project: snap-or-retake

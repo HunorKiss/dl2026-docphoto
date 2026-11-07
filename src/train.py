@@ -64,6 +64,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Train the reference model")
     ap.add_argument("--fold", required=True, help="a fold number to validate on, or 'all'")
     ap.add_argument("--config", default=None)
+    ap.add_argument("--model", default=None, choices=["small_cnn", "effnet_b0"],
+                    help="override the config's model.type (small_cnn | effnet_b0)")
     ap.add_argument("--seed", type=int, default=None, help="overrides the config's seed")
     ap.add_argument("--out", default="models/reference")
     a = ap.parse_args()
@@ -74,10 +76,12 @@ def main() -> None:
     cfg = load_config(a.config) if a.config else load_config()
     if a.seed is not None:
         cfg["seed"] = a.seed
+    if a.model is not None:
+        cfg.setdefault("model", {})["type"] = a.model    # command-line choice of network
     d, t = cfg["data"], cfg["train"]
     # The run's name ends up in every file it writes; keep it unique if you
     # change something that is not in it (or pass another --out).
-    name = f"smallcnn_{d['image_size']}_fold{a.fold}_seed{cfg['seed']}"
+    name = f"{cfg.get('model', {}).get('type', 'smallcnn')}_{d['image_size']}_fold{a.fold}_seed{cfg['seed']}"
     # Weights & Biases, before the seed is set: whatever the logging does, it
     # cannot change a random number the training draws. The --out folder is
     # the group, so the four fold runs of one experiment sit together.
@@ -130,12 +134,31 @@ def main() -> None:
 
     # --- 5. Optimiser and schedule. AdamW with decoupled weight decay; the
     # scheduler is stepped after every batch, so `total` counts batches.
-    opt = torch.optim.AdamW(param_groups(model, t["weight_decay"]), lr=t["lr"])
-    total = t["epochs"] * len(train_dl)
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_at(s, total, t["warmup"]))
+    # Fine-tuning a pretrained backbone (model.set_backbone_frozen): for the
+    # first `freeze_epochs` epochs only the head trains; then the backbone is
+    # unfrozen and the optimiser and schedule are rebuilt over the remaining
+    # epochs, so the whole network fine-tunes with its own warm-up-cosine.
+    freeze_epochs = int(t.get("freeze_epochs", 0))
+    can_freeze = hasattr(model, "set_backbone_frozen") and freeze_epochs > 0
+    if can_freeze:
+        model.set_backbone_frozen(True)
+        print(f"fine-tuning: head only for {freeze_epochs} epochs, then the whole network")
+
+    def make_opt_sched(epochs_left: int):
+        o = torch.optim.AdamW(param_groups(model, t["weight_decay"]), lr=t["lr"])
+        tot = max(1, epochs_left) * len(train_dl)
+        s = torch.optim.lr_scheduler.LambdaLR(o, lambda step: lr_at(step, tot, t["warmup"]))
+        return o, s
+
+    opt, sched = make_opt_sched(t["epochs"] if not can_freeze else freeze_epochs)
 
     log = []
     for epoch in range(1, t["epochs"] + 1):
+        if can_freeze and epoch == freeze_epochs + 1:
+            model.set_backbone_frozen(False)        # unfreeze and fine-tune the whole network
+            opt, sched = make_opt_sched(t["epochs"] - freeze_epochs)
+            print(f"  epoch {epoch}: backbone unfrozen, fine-tuning all "
+                  f"{sum(p.numel() for p in model.parameters() if p.requires_grad):,} parameters")
         model.train()                               # BatchNorm uses batch statistics
         start, losses = time.time(), []
         for x, y in train_dl:

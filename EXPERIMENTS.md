@@ -17,7 +17,7 @@ table, marked "no", and the next step builds on the last one that did.
 
 | # | change | why I expected it to help | config | fold 0 | fold 1 | fold 2 | fold 3 | out-of-fold | kept? |
 |---|---|---|---|---|---|---|---|---|---|
-| 0 | the reference, your own run (about 0.194) | | `configs/reference.yaml` | | | | | | yes |
+| 0 | the reference, your own run | | `configs/reference.yaml` | 0.1769 | 0.1897 | 0.2316 | 0.1772 | 0.1956 | yes |
 | 1 | | | | | | | | | |
 | 2 | | | | | | | | | |
 | 3 | | | | | | | | | |
