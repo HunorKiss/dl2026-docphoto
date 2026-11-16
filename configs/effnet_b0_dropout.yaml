@@ -34,4 +34,6 @@ train:
   num_workers: 0                 # raise to 2 on a Kaggle GPU; kept at 0 for an exact comparison
 wandb:
   project: snap-or-retake
-  experiment: effnet_b0_dropout0.4   # readable W&B run-name prefix; fold and seed are appended
+  # No `experiment` here: the W&B run name comes from this config file's name
+  # (effnet_b0_dropout), with fold and seed appended. Set `experiment` only to
+  # override that, or pass --name on the command line.

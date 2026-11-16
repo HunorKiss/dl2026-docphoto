@@ -80,19 +80,17 @@ def main() -> None:
     if a.model is not None:
         cfg.setdefault("model", {})["type"] = a.model    # command-line choice of network
     d, t = cfg["data"], cfg["train"]
-    # The run's name ends up in W&B and in every file it writes. By default it
-    # is built from the model, image size, fold and seed. An optional
-    # `wandb.experiment` in the config is used as a readable prefix, so an
-    # experiment is easy to find in W&B while the fold and seed still make each
-    # of the four runs distinct. --name overrides everything.
-    default_name = f"{cfg.get('model', {}).get('type', 'smallcnn')}_{d['image_size']}_fold{a.fold}_seed{cfg['seed']}"
-    experiment = cfg.get("wandb", {}).get("experiment")
-    if a.name:
-        name = a.name
-    elif experiment:
+    # The run's name ends up in W&B and in every file it writes. The experiment
+    # name is, in order of preference: --name; wandb.experiment in the config;
+    # or the config file's own name (e.g. configs/effnet_b0_dropout.yaml ->
+    # "effnet_b0_dropout"), which is the simplest unique id. The fold and seed
+    # are always appended, so the four runs of one experiment stay distinct.
+    config_stem = Path(a.config).stem if a.config else None     # file name without .yaml
+    experiment = a.name or cfg.get("wandb", {}).get("experiment") or config_stem
+    if experiment:
         name = f"{experiment}_fold{a.fold}_seed{cfg['seed']}"
     else:
-        name = default_name
+        name = f"{cfg.get('model', {}).get('type', 'smallcnn')}_{d['image_size']}_fold{a.fold}_seed{cfg['seed']}"
     # Weights & Biases, before the seed is set: whatever the logging does, it
     # cannot change a random number the training draws. The --out folder is
     # the group, so the four fold runs of one experiment sit together.
