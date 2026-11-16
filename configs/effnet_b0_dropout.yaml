@@ -22,7 +22,8 @@ model:
 
 train:
   epochs: 12
-  phases: [head]            # head first, then fine-tune the whole net
+  phases: [head, all]            # head first, then fine-tune the whole net
+  phase_epochs: [4, 8]           # 4 epochs on the head only, then 8 on the whole network
   batch_size: 8                  # raise to 32 on a Kaggle GPU for speed; kept at 8 for an exact comparison
   lr: 1.0e-4                     # "head" phases
   finetune_lr: 1.0e-5            # "all" phases: smaller lr, nudge the backbone gently

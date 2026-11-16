@@ -153,17 +153,28 @@ def main() -> None:
     #   phases: [all]         the whole net only, for all epochs
     # Learning rate per phase: "head" uses train.lr, "all" uses train.finetune_lr
     # (default lr/10) -- the pretrained backbone is nudged gently so fine-tuning
-    # does not overwrite what ImageNet taught it. Backward compatibility: if no
-    # `phases` is given but `freeze_epochs` is, that maps to [head, all].
+    # does not overwrite what ImageNet taught it.
+    # Epochs per phase: give `phase_epochs` (a list parallel to `phases`, e.g.
+    # [4, 8]) to set them explicitly; otherwise `epochs` is split evenly across
+    # the phases. Backward compatibility: if no `phases` is given but
+    # `freeze_epochs` is, that maps to [head, all] with freeze_epochs on the head.
     head_lr = t["lr"]
     finetune_lr = float(t.get("finetune_lr", t["lr"] / 10))
     can_freeze = hasattr(model, "set_backbone_frozen")
 
     phase_names = t.get("phases")
+    phase_epochs = t.get("phase_epochs")
     if phase_names is None:
         fe = int(t.get("freeze_epochs", 0))
         phase_names = ["head", "all"] if (can_freeze and fe > 0) else ["all"]
         split = [fe, t["epochs"] - fe] if phase_names == ["head", "all"] else [t["epochs"]]
+    elif phase_epochs is not None:
+        # explicit epochs per phase
+        if len(phase_epochs) != len(phase_names):
+            raise ValueError(f"phase_epochs {phase_epochs} must have one entry per phase {phase_names}")
+        split = [int(e) for e in phase_epochs]
+        if sum(split) != t["epochs"]:
+            print(f"note: phase_epochs sum {sum(split)} != epochs {t['epochs']}; using the phase_epochs sum")
     else:
         # split the epochs across the listed phases as evenly as possible
         n = len(phase_names)
@@ -202,8 +213,9 @@ def main() -> None:
 
     opt, sched = apply_phase(*phases[0])
 
+    total_epochs = sum(ne for _, ne, _ in phases)   # the real epoch count (phase_epochs may override `epochs`)
     log = []
-    for epoch in range(1, t["epochs"] + 1):
+    for epoch in range(1, total_epochs + 1):
         if epoch in phase_of_start and epoch != 1:         # a new phase begins this epoch
             opt, sched = apply_phase(*phases[phase_of_start[epoch]])
         model.train()                               # BatchNorm uses batch statistics
