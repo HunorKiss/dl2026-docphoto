@@ -22,7 +22,7 @@ model:
 
 train:
   epochs: 12
-  phases: [head, all]            # head first, then fine-tune the whole net
+  phases: [head]            # head first, then fine-tune the whole net
   batch_size: 8                  # raise to 32 on a Kaggle GPU for speed; kept at 8 for an exact comparison
   lr: 1.0e-4                     # "head" phases
   finetune_lr: 1.0e-5            # "all" phases: smaller lr, nudge the backbone gently
@@ -33,3 +33,4 @@ train:
   num_workers: 0                 # raise to 2 on a Kaggle GPU; kept at 0 for an exact comparison
 wandb:
   project: snap-or-retake
+  experiment: effnet_b0_dropout0.4   # readable W&B run-name prefix; fold and seed are appended

@@ -66,6 +66,7 @@ def main() -> None:
     ap.add_argument("--config", default=None)
     ap.add_argument("--model", default=None, choices=["small_cnn", "effnet_b0"],
                     help="override the config's model.type (small_cnn | effnet_b0)")
+    ap.add_argument("--name", default=None, help="override the run name (W&B and output files)")
     ap.add_argument("--seed", type=int, default=None, help="overrides the config's seed")
     ap.add_argument("--out", default="models/reference")
     a = ap.parse_args()
@@ -79,9 +80,19 @@ def main() -> None:
     if a.model is not None:
         cfg.setdefault("model", {})["type"] = a.model    # command-line choice of network
     d, t = cfg["data"], cfg["train"]
-    # The run's name ends up in every file it writes; keep it unique if you
-    # change something that is not in it (or pass another --out).
-    name = f"{cfg.get('model', {}).get('type', 'smallcnn')}_{d['image_size']}_fold{a.fold}_seed{cfg['seed']}"
+    # The run's name ends up in W&B and in every file it writes. By default it
+    # is built from the model, image size, fold and seed. An optional
+    # `wandb.experiment` in the config is used as a readable prefix, so an
+    # experiment is easy to find in W&B while the fold and seed still make each
+    # of the four runs distinct. --name overrides everything.
+    default_name = f"{cfg.get('model', {}).get('type', 'smallcnn')}_{d['image_size']}_fold{a.fold}_seed{cfg['seed']}"
+    experiment = cfg.get("wandb", {}).get("experiment")
+    if a.name:
+        name = a.name
+    elif experiment:
+        name = f"{experiment}_fold{a.fold}_seed{cfg['seed']}"
+    else:
+        name = default_name
     # Weights & Biases, before the seed is set: whatever the logging does, it
     # cannot change a random number the training draws. The --out folder is
     # the group, so the four fold runs of one experiment sit together.
