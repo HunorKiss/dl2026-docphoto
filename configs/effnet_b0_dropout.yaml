@@ -1,0 +1,35 @@
+# Experiment step: EfficientNet-B0, same as configs/effnet_b0.yaml but with a
+# larger head dropout (0.2 -> 0.4) to fight the overfitting seen when the
+# backbone is unfrozen. The ONLY change vs effnet_b0.yaml is model.dropout,
+# so the 4-fold out-of-fold RMSE is directly comparable.
+#   python -m src.train --fold 0 --config configs/effnet_b0_dropout.yaml --out models/effnet_b0_dropout
+seed: 42
+
+data:
+  raw: data/raw
+  work: data/work/reference      # same 1024 px resize cache; no re-prepare needed
+  cache_size: 1024
+  image_size: 768
+
+split:
+  column: group_strict
+  n_folds: 4
+
+model:
+  type: effnet_b0
+  dropout: 0.4                    # was 0.2: stronger regularisation on the head
+  pretrained: true
+
+train:
+  epochs: 12
+  phases: [head, all]            # head first, then fine-tune the whole net
+  batch_size: 8                  # raise to 32 on a Kaggle GPU for speed; kept at 8 for an exact comparison
+  lr: 1.0e-4                     # "head" phases
+  finetune_lr: 1.0e-5            # "all" phases: smaller lr, nudge the backbone gently
+  weight_decay: 0.05
+  warmup: 0.2
+  max_shift: 16
+  amp: true
+  num_workers: 0                 # raise to 2 on a Kaggle GPU; kept at 0 for an exact comparison
+wandb:
+  project: snap-or-retake
