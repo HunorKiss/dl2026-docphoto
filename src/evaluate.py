@@ -10,14 +10,25 @@ from src.loss import to_prediction
 
 
 @torch.no_grad()
-def predict(model: nn.Module, loader, amp: bool = True) -> np.ndarray:
-    """Usability in [0, 1] for every photograph of the loader, in order."""
+def predict(model: nn.Module, loader, amp: bool = True, tta: bool = False) -> np.ndarray:
+    """Usability in [0, 1] for every photograph of the loader, in order.
+
+    With `tta`, each photograph is predicted twice, as it is and mirrored
+    left-right, and the two predictions are averaged. Mirroring is one of the
+    two augmentations training uses, so it is a view the network knows, and it
+    changes nothing about image quality. Each photograph is still predicted on
+    its own: nothing is shared between photographs.
+    """
     dev = device()
     model.to(dev).eval()
     out = []
     for x, _ in loader:
+        x = x.to(dev, non_blocking=dev.type == "cuda")     # asynchronous copies only where they are safe
         with autocast(dev, amp):
-            out.append(to_prediction(model(x.to(dev, non_blocking=True))).cpu())
+            p = to_prediction(model(x))
+            if tta:
+                p = (p + to_prediction(model(x.flip(-1)))) / 2
+        out.append(p.cpu())
     return torch.cat(out).numpy()
 
 

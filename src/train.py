@@ -2,6 +2,11 @@
 
     python -m src.train --fold 0      # train on folds 1-3, report RMSE on fold 0
     python -m src.train --fold all    # train on every photograph: the model you submit
+    python -m src.train --fold 0 --tta   # validate with mirror test-time augmentation
+
+The checkpoints are named after the config file, <config>_fold<k>_seed<s>.pt (see
+src/config.py). To average the four fold models into one submission, use
+`python -m src.predict --ensemble`.
 
 A fold run writes its checkpoint and its validation predictions; the `all` run
 writes only the checkpoint, since nothing is left to validate on. Both use the
@@ -40,7 +45,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from src import tracking
-from src.config import autocast, device, load_config, seed_everything
+from src.config import autocast, device, load_config, run_name, seed_everything
 from src.data import TARGET, Photos, assign_folds, cache_path, train_table, worker_init
 from src.evaluate import predict, rmse
 from src.loss import loss_fn
@@ -63,6 +68,9 @@ def pixel_stats(ds: Photos, n: int = 200) -> tuple[float, float]:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Train the reference model")
     ap.add_argument("--fold", required=True, help="a fold number to validate on, or 'all'")
+    ap.add_argument("--tta", action="store_true",
+                    help="validate with mirror test-time augmentation: every validation photograph is "
+                         "predicted as it is and mirrored, and the two predictions are averaged")
     ap.add_argument("--config", default=None)
     ap.add_argument("--model", default=None, choices=["small_cnn", "effnet_b0"],
                     help="override the config's model.type (small_cnn | effnet_b0)")
@@ -80,21 +88,16 @@ def main() -> None:
     if a.model is not None:
         cfg.setdefault("model", {})["type"] = a.model    # command-line choice of network
     d, t = cfg["data"], cfg["train"]
-    # The run's name ends up in W&B and in every file it writes. The experiment
-    # name is, in order of preference: --name; wandb.experiment in the config;
-    # or the config file's own name (e.g. configs/effnet_b0_dropout.yaml ->
-    # "effnet_b0_dropout"), which is the simplest unique id. The fold and seed
-    # are always appended, so the four runs of one experiment stay distinct.
-    config_stem = Path(a.config).stem if a.config else None     # file name without .yaml
-    experiment = a.name or cfg.get("wandb", {}).get("experiment") or config_stem
-    if experiment:
-        name = f"{experiment}_fold{a.fold}_seed{cfg['seed']}"
-    else:
-        name = f"{cfg.get('model', {}).get('type', 'smallcnn')}_{d['image_size']}_fold{a.fold}_seed{cfg['seed']}"
+    # The run's name ends up in W&B and in every file it writes (checkpoint,
+    # log, validation predictions). It is <experiment>_fold<k>_seed<s>, where the
+    # experiment is, in order of preference: --name; wandb.experiment in the
+    # config; or the config file's own name (configs/effnet_b0_dropout.yaml ->
+    # "effnet_b0_dropout"). See src/config.py.
+    name = run_name(cfg, a.config, a.fold, a.name)
     # Weights & Biases, before the seed is set: whatever the logging does, it
     # cannot change a random number the training draws. The --out folder is
     # the group, so the four fold runs of one experiment sit together.
-    tracking.start({**cfg, "fold": a.fold, "out": a.out}, name, group=Path(a.out).name,
+    tracking.start({**cfg, "fold": a.fold, "out": a.out, "val_tta": a.tta}, name, group=Path(a.out).name,
                    job_type="all" if a.fold == "all" else "fold")
     seed_everything(cfg["seed"])
 
@@ -134,6 +137,10 @@ def main() -> None:
     # validation fold) and stored inside the model, so they travel with the
     # checkpoint and predict.py applies exactly the same standardisation.
     dev = device()
+    # Asynchronous host-to-device copies are for CUDA with pinned memory. On MPS
+    # pinned memory does not exist, and an asynchronous copy from ordinary memory
+    # can read a batch that has already been overwritten.
+    nb = dev.type == "cuda"
     model = build_model(cfg, prior=float(tr[TARGET].mean()))
     mean, std = pixel_stats(Photos([cache_path(cfg, "train", i) for i in tr["image_id"]],
                                    size=d["image_size"]))
@@ -162,6 +169,9 @@ def main() -> None:
 
     phase_names = t.get("phases")
     phase_epochs = t.get("phase_epochs")
+    # A config with neither `phases` nor `freeze_epochs` (configs/reference.yaml)
+    # is a plain run: the whole network at train.lr, as before phases existed.
+    plain_run = phase_names is None and not (can_freeze and int(t.get("freeze_epochs", 0)) > 0)
     if phase_names is None:
         fe = int(t.get("freeze_epochs", 0))
         phase_names = ["head", "all"] if (can_freeze and fe > 0) else ["all"]
@@ -180,12 +190,13 @@ def main() -> None:
         split = [base + (1 if i < extra else 0) for i in range(n)]
 
     phases = []           # (mode, n_epochs, lr), skipping zero-epoch phases
-    for name, ne in zip(phase_names, split, strict=True):
+    # `phase`, not `name`: `name` is the run's name and the checkpoint is saved under it.
+    for phase, ne in zip(phase_names, split, strict=True):
         if ne <= 0:
             continue
-        if name not in ("head", "all"):
-            raise ValueError(f"unknown phase {name!r}; use 'head' or 'all'")
-        phases.append((name, ne, head_lr if name == "head" else finetune_lr))
+        if phase not in ("head", "all"):
+            raise ValueError(f"unknown phase {phase!r}; use 'head' or 'all'")
+        phases.append((phase, ne, head_lr if (phase == "head" or plain_run) else finetune_lr))
     print("training phases:", [(m, e, f"lr {lr:.1e}") for m, e, lr in phases])
 
     def make_opt_sched(epochs_left: int, lr: float):
@@ -219,7 +230,7 @@ def main() -> None:
         model.train()                               # BatchNorm uses batch statistics
         start, losses = time.time(), []
         for x, y in train_dl:
-            x, y = x.to(dev, non_blocking=True), y.to(dev, non_blocking=True)
+            x, y = x.to(dev, non_blocking=nb), y.to(dev, non_blocking=nb)
             # The forward pass in bfloat16 where the GPU supports it (faster,
             # half the memory); the loss in full precision.
             with autocast(dev, t["amp"]):
@@ -241,7 +252,7 @@ def main() -> None:
         row = {"epoch": epoch, "train_rmse": math.sqrt(np.mean(losses)),
                "seconds": round(time.time() - start)}
         if val_dl is not None:
-            row["val_rmse"] = rmse(va[TARGET], predict(model, val_dl, t["amp"]))
+            row["val_rmse"] = rmse(va[TARGET], predict(model, val_dl, t["amp"], tta=a.tta))
         log.append(row)
         tracking.log({**row, "lr": sched.get_last_lr()[0]})
         print("  " + "  ".join(f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}"
@@ -262,7 +273,7 @@ def main() -> None:
         # One row per validation photograph: label, prediction and the columns
         # you need for error analysis. Pool the four folds' files for the
         # out-of-fold RMSE in EXPERIMENTS.md.
-        p = predict(model, val_dl, t["amp"])
+        p = predict(model, val_dl, t["amp"], tta=a.tta)
         res = va[["image_id", TARGET, "eval_ok", "family"]].assign(pred=p)
         res.to_csv(out / f"{name}_val.csv", index=False)
         # The reported score leaves out the 47 photographs with eval_ok = 0,
@@ -272,7 +283,7 @@ def main() -> None:
         ok = res["eval_ok"] == 1
         summary = {"val_rmse_eval_ok": rmse(res.loc[ok, TARGET], res.loc[ok, "pred"]), "n_eval_ok": int(ok.sum())}
         print(f"{name}: validation RMSE {summary['val_rmse_eval_ok']:.4f} "
-              f"on {summary['n_eval_ok']} photographs (eval_ok)")
+              f"on {summary['n_eval_ok']} photographs (eval_ok){', mirror TTA' if a.tta else ''}")
     tracking.finish(summary)
     print(f"-> {out / (name + '.pt')}")
 
