@@ -1,0 +1,46 @@
+# The EfficientNet-B0 recipe of the first Kaggle run (public 0.148), trained on
+# the four folds whose average is predicted with `src.predict --ensemble`:
+# head only for 6 epochs, then the whole network for 6, the SAME learning rate
+# 1e-4 in both phases, dropout 0.2.
+# The only difference from configs/effnet_b0_ensemble.yaml is finetune_lr:
+# 1e-4 here, 1e-5 there. With 1e-5 all four folds underfitted (train and val
+# RMSE both about 0.17) and the ensemble scored 0.18995 on the public board.
+#
+#   for k in 0 1 2 3:  python -m src.train --fold k --tta --config configs/effnet_b0_ens_lr1e-4.yaml --out models/effnet_b0_ens_lr1e-4
+#   python -m src.predict --ensemble --config configs/effnet_b0_ens_lr1e-4.yaml --models models/effnet_b0_ens_lr1e-4 --tta
+#
+# Everything is named after this file: the W&B runs (effnet_b0_ens_lr1e-4_fold0_seed42, ...),
+# the checkpoints in models/effnet_b0_ens_lr1e-4/ and the submission
+# submissions/effnet_b0_ens_lr1e-4_tta.csv.
+seed: 42
+
+data:
+  raw: data/raw
+  work: data/work/reference      # the 1024 px resize cache of src.prepare
+  cache_size: 1024
+  image_size: 768
+
+split:
+  column: group_strict
+  n_folds: 4
+
+model:
+  type: effnet_b0
+  dropout: 0.2
+  pretrained: true
+
+train:
+  epochs: 12
+  phases: [head, all]
+  phase_epochs: [6, 6]
+  batch_size: 8
+  lr: 1.0e-4                     # the head phase
+  finetune_lr: 1.0e-4            # the whole-network phase: the same lr, as in the 0.148 run
+  weight_decay: 0.05
+  warmup: 0.2
+  max_shift: 16
+  amp: true
+  num_workers: 0
+
+wandb:
+  project: snap-or-retake
