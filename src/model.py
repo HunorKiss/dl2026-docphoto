@@ -64,6 +64,24 @@ class SmallCNN(nn.Module):
         return self.head(self.drop(f)).squeeze(1)
 
 
+class MaxHalfScale(nn.Module):
+    """Multiplies the second half of the pooled features (the maxima) by one learnable number.
+
+    It starts at `init`, the ratio of the feature map's mean to its maximum on the
+    training photographs, so that the means and the maxima reach the head on the
+    same scale. One number for the whole half: what differs between channels and
+    between photographs is left as it is.
+    """
+
+    def __init__(self, init: float = 0.02):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(float(init)))
+
+    def forward(self, f: torch.Tensor) -> torch.Tensor:
+        half = f.shape[1] // 2
+        return torch.cat([f[:, :half], f[:, half:] * self.scale], dim=1)
+
+
 class EfficientNetB0Reg(nn.Module):
     """An ImageNet-pretrained EfficientNet-B0 with a one-logit regression head.
 
@@ -72,19 +90,43 @@ class EfficientNetB0Reg(nn.Module):
     Like SmallCNN standardises its own input, this model adapts its own input so
     data.py and the training loop stay unchanged: grey is repeated to 3 channels
     and ImageNet-normalised inside forward(). The head starts at logit(prior) so
-    step 0 predicts the training mean. `freeze_backbone` freezes every weight
-    except the head, for a first phase of training the head alone; train.py
-    unfreezes it after `train.freeze_epochs` epochs.
+    step 0 predicts the training mean. `set_backbone_frozen` freezes every weight
+    except the head, for the "head" training phases (src/train.py).
+
+    `pool` decides what the head sees of the backbone's 1280 x 24 x 24 feature map:
+      "avg"     the mean over all positions (torchvision's own head): 1280 numbers.
+      "avgmax"  the mean and the maximum side by side, as in SmallCNN: 2560 numbers,
+                the max half scaled by a learnable number (`pool_norm`) before the head.
+                The mean says how sharp the page is overall, the maximum how strong
+                the strongest response anywhere is, so a defect in one region of the
+                page is not averaged away over the other positions.
     """
 
-    def __init__(self, dropout: float = 0.2, prior: float = 0.5, pretrained: bool = True):
+    POOLS = ("avg", "avgmax")
+
+    def __init__(self, dropout: float = 0.2, prior: float = 0.5, pretrained: bool = True, pool: str = "avg"):
         super().__init__()
         from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
+        if pool not in self.POOLS:
+            raise ValueError(f"unknown pool {pool!r}; use one of {self.POOLS}")
+        self.pool = pool
         weights = EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
         self.backbone = efficientnet_b0(weights=weights)
-        in_features = self.backbone.classifier[1].in_features
+        in_features = self.backbone.classifier[1].in_features * (2 if pool == "avgmax" else 1)
         self.backbone.classifier = nn.Sequential(nn.Dropout(dropout), nn.Linear(in_features, 1))
         self.head = self.backbone.classifier[1]          # so sanity.py / optim.py can find `head`
+        # The maxima of the feature map are about 50 times larger than its means
+        # (measured on the training photographs: 8.1 against 0.165 on average).
+        # Fed side by side to one linear layer, the max half dominates: AdamW moves
+        # every weight by about the same step, so the logit jumps by tens per step,
+        # the sigmoid saturates and learning stops. `MaxHalfScale` multiplies the
+        # max half by a learnable number that starts at that ratio, 1/50, so both
+        # halves enter the head on the same scale. It uses no batch statistics and
+        # changes nothing between photographs. (A BatchNorm here kept oscillating on
+        # small batches.) It belongs to the head, so it trains also while the
+        # backbone is frozen. With "avg" it is the identity: those models are
+        # exactly as before, and so are their checkpoints.
+        self.pool_norm = MaxHalfScale() if pool == "avgmax" else nn.Identity()
 
         # ImageNet input statistics, kept as buffers so they travel with the checkpoint.
         m = EfficientNet_B0_Weights.IMAGENET1K_V1.transforms()
@@ -123,7 +165,12 @@ class EfficientNetB0Reg(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.repeat(1, 3, 1, 1)                         # 1 grey channel -> 3
         x = (x - self.norm_mean) / self.norm_std         # ImageNet normalisation
-        return self.backbone(x).squeeze(1)               # logit; the sigmoid lives in src/loss.py
+        f = self.backbone.features(x)                    # (batch, 1280, h, w)
+        if self.pool == "avg":
+            f = torch.flatten(self.backbone.avgpool(f), 1)   # exactly torchvision's EfficientNet.forward
+        else:
+            f = self.pool_norm(torch.cat([f.mean((2, 3)), f.amax((2, 3))], dim=1))
+        return self.backbone.classifier(f).squeeze(1)    # logit; the sigmoid lives in src/loss.py
 
 
 def build_model(cfg: dict, prior: float = 0.5):
@@ -132,7 +179,8 @@ def build_model(cfg: dict, prior: float = 0.5):
     if kind == "small_cnn":
         return SmallCNN(m["widths"], m["stem_stride"], m["stem_kernel"], m["dropout"], prior)
     if kind == "effnet_b0":
-        return EfficientNetB0Reg(m.get("dropout", 0.2), prior, m.get("pretrained", True))
+        # model.pool defaults to "avg", so configs and checkpoints from before it existed are unchanged
+        return EfficientNetB0Reg(m.get("dropout", 0.2), prior, m.get("pretrained", True), m.get("pool", "avg"))
     raise ValueError(f"unknown model type {kind!r}")
 
 
