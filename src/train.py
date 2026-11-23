@@ -47,7 +47,7 @@ from torch.utils.data import DataLoader
 
 from src import tracking
 from src.config import amp_dtype, autocast, device, load_config, run_name, seed_everything
-from src.data import TARGET, Photos, assign_folds, cache_path, train_table, worker_init
+from src.data import TARGET, Photos, assign_folds, build_photos, cache_path, train_table, worker_init
 from src.evaluate import predict, rmse
 from src.loss import make_loss, to_prediction
 from src.model import build_model
@@ -117,8 +117,8 @@ def main() -> None:
                     help="validate with mirror test-time augmentation: every validation photograph is "
                          "predicted as it is and mirrored, and the two predictions are averaged")
     ap.add_argument("--config", default=None)
-    ap.add_argument("--model", default=None, choices=["small_cnn", "effnet_b0", "convnext_tiny"],
-                    help="override the config's model.type (small_cnn | effnet_b0 | convnext_tiny)")
+    ap.add_argument("--model", default=None, choices=["small_cnn", "effnet_b0", "convnext_tiny", "musiq"],
+                    help="override the config's model.type (small_cnn | effnet_b0 | convnext_tiny | musiq)")
     ap.add_argument("--name", default=None, help="override the run name (W&B and output files)")
     ap.add_argument("--seed", type=int, default=None, help="overrides the config's seed")
     ap.add_argument("--epochs", type=int, default=None,
@@ -170,14 +170,14 @@ def main() -> None:
     print(f"{name}: {len(tr)} training photographs, {len(va)} validation")
 
     # --- 3. Data loaders. They read the 1024 px copies written by prepare.py
-    # (run it first) and letterbox them to image_size grey squares. Only the
+    # (run it first) and letterbox them to image_size grey squares (musiq: centred canvases, see data.build_photos). Only the
     # training loader augments and shuffles; it also drops the last, smaller
     # batch, so that every step's gradient is averaged over the same number of
     # photographs. The generator seeds the shuffling, worker_init the
     # augmentation in each worker process.
     def loader(rows, augment):
-        ds = Photos([cache_path(cfg, "train", i) for i in rows["image_id"]], rows[TARGET],
-                    size=d["image_size"], augment=augment, max_shift=t["max_shift"])
+        ds = build_photos(cfg, [cache_path(cfg, "train", i) for i in rows["image_id"]], rows[TARGET],
+                          augment=augment)
         g = torch.Generator().manual_seed(cfg["seed"])
         return DataLoader(ds, batch_size=t["batch_size"], shuffle=augment, drop_last=augment,
                           num_workers=t["num_workers"], pin_memory=True, generator=g,
@@ -197,10 +197,11 @@ def main() -> None:
     # can read a batch that has already been overwritten.
     nb = dev.type == "cuda"
     model = build_model(cfg, prior=float(tr[TARGET].mean()))
-    mean, std = pixel_stats(Photos([cache_path(cfg, "train", i) for i in tr["image_id"]],
-                                   size=d["image_size"]))
-    model.in_mean.fill_(mean)
-    model.in_std.fill_(std)
+    if not getattr(model, "multiscale", False):     # MUSIQ's canvases carry a -1 sentinel; no statistics
+        mean, std = pixel_stats(Photos([cache_path(cfg, "train", i) for i in tr["image_id"]],
+                                       size=d["image_size"]))
+        model.in_mean.fill_(mean)
+        model.in_std.fill_(std)
     model.to(dev)
 
     # --- 5. Training phases, optimiser and schedule.

@@ -319,6 +319,10 @@ os.environ["PYTHONPATH"] = "."          # what the Docker image sets: scripts/sa
 !python -m src.predict models/reference/smallcnn_768_foldall_seed42.pt
 ```
 
+MUSIQ (`configs/musiq_koniq.yaml`) is vendored from IQA-PyTorch (pyiqa) under its
+non-commercial licence (coursework use only); its weights come from that project's
+GitHub release and are cached in `/kaggle/temp/musiq` or `~/.cache/musiq`
+(override with `MUSIQ_WEIGHTS_DIR`).
 Look up the two `/kaggle/input/...` folder names in the notebook's input panel.
 A private repository needs a GitHub token with read access in the URL (add it
 as a Kaggle *Secret*, never in the notebook's text). Download the checkpoint

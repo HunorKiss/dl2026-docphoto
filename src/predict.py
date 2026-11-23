@@ -26,7 +26,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 from src.config import experiment_name, load_config, run_name
-from src.data import TARGET, Photos, cache_path, test_table
+from src.data import TARGET, build_photos, cache_path, test_table
 from src.evaluate import predict
 from src.model import load_checkpoint
 
@@ -92,7 +92,7 @@ def main() -> None:
         if missing:
             raise SystemExit(f"{len(missing)} test photographs are not resized yet; "
                              f"run python -m src.prepare first")
-        dl = DataLoader(Photos(paths, size=cfg["data"]["image_size"]),
+        dl = DataLoader(build_photos(cfg, paths),
                         batch_size=a.batch_size, num_workers=a.workers)
         preds.append(predict(model, dl, cfg["train"]["amp"], tta=a.tta))
         print(f"{ck}: mean {preds[-1].mean():.4f}, sd {preds[-1].std():.4f}")

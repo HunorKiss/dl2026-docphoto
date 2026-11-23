@@ -1,0 +1,60 @@
+# MUSIQ (multi-scale image quality transformer, 27.1 M parameters), pretrained
+# on KonIQ-10k, fine-tuned on grey photographs with a fresh linear head
+# 384 -> 1 (logit; the sigmoid is in src/loss.py). The first 2 epochs train the
+# head only, the next 8 the whole network (backbone 3e-5, head 2e-4, AdamW).
+#
+# LICENCE: the architecture and weights come from IQA-PyTorch (pyiqa, S-Lab /
+# PolyForm Noncommercial; port of Google's MUSIQ). Non-commercial, coursework
+# use only. The code is vendored in src/musiq.py; the weights are downloaded
+# from the pyiqa GitHub release (needs Internet on) and cached in
+# $MUSIQ_WEIGHTS_DIR, else /kaggle/temp/musiq, else ~/.cache/musiq.
+# Checkpoints written by src.train hold all weights: src.predict never downloads.
+#
+#   for k in 0 1 2 3:  python -m src.train --fold k --tta --config configs/musiq_koniq.yaml --out models/musiq_koniq
+#   python -m src.train --fold all --config configs/musiq_koniq.yaml --out models/musiq_koniq     # optionally --epochs N
+#   python -m src.predict --ensemble --config configs/musiq_koniq.yaml --models models/musiq_koniq --tta --batch-size 8 --workers 2
+#   python -m src.predict models/musiq_koniq/musiq_koniq_foldall_seed42.pt --tta --batch-size 4 --workers 2 --out submissions/musiq_koniq_single_all_tta.csv
+# src.predict defaults to --batch-size 32: always pass a small one for musiq.
+#
+# Memory (estimate, not measured): up to 962 tokens per photograph (49 + 144 +
+# at most 768 native patches), SDPA attention, fp16 autocast: about 0.6 GB per
+# photograph at worst (+0.5 GB weights, gradients, AdamW state). Batch 4 is about
+# 3 GB, so it fits a 16 GB T4/P100 with room; accumulation over 4 batches gives
+# an effective batch of 16. Try batch_size 8 / accum_steps 2 if memory allows.
+# To use the SPAQ weights set model.weights: spaq (and --name for another run name).
+# Pre-test (400 photographs, zero-shot): KonIQ + grey input was best,
+# Spearman 0.295, linear out-of-fold RMSE 0.2066.
+seed: 42
+data:
+  raw: data/raw
+  work: data/work/reference      # the 1024 px resize cache of src.prepare
+  cache_size: 1024               # MUSIQ's canvas size
+  image_size: 1024               # unused by musiq; kept for tooling that reads it
+split:
+  column: group_strict
+  n_folds: 4
+model:
+  type: musiq
+  weights: koniq                 # koniq | spaq
+  pretrained: true
+  native_max_patches: 768        # a 1024 x 768 page is exactly 32 x 24 = 768 patches
+  color: false                   # grey input, repeated to 3 channels inside the model
+train:
+  epochs: 10
+  phases: [head, all]
+  phase_epochs: [2, 8]
+  batch_size: 4
+  accum_steps: 4                 # effective batch 16
+  lr: 2.0e-4                     # head phase
+  finetune_lr: 3.0e-5            # the backbone in the "all" phase
+  finetune_head_lr: 2.0e-4       # the head in the "all" phase
+  weight_decay: 0.05
+  warmup: 0.15                   # fraction of each phase
+  max_shift: 16
+  loss: huber
+  huber_delta: 0.1
+  amp: fp16                      # float16 autocast + loss scaling on CUDA; ignored on MPS / CPU
+  early_stopping: 4
+  num_workers: 2                 # use 0 on a Mac (MPS)
+wandb:
+  project: snap-or-retake

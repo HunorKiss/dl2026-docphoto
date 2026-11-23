@@ -154,6 +154,14 @@ class MultiscalePhotos(Dataset):
         return x, y
 
 
+def build_photos(cfg: dict, paths, targets=None, augment: bool = False):
+    """The dataset the configured model reads: canvases for MUSIQ, letterboxed squares otherwise."""
+    if cfg["model"].get("type") == "musiq":
+        return MultiscalePhotos(paths, targets, canvas=cfg["data"]["cache_size"], augment=augment,
+                                max_shift=cfg["train"].get("max_shift", 16),
+                                color=cfg["model"].get("color", False))
+    return Photos(paths, targets, size=cfg["data"]["image_size"], augment=augment,
+                  max_shift=cfg["train"].get("max_shift", 16))
 def worker_init(worker_id: int) -> None:
     # each DataLoader worker gets its own numpy stream, derived from torch's seed
     np.random.seed(torch.initial_seed() % 2**32)

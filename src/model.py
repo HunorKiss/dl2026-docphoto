@@ -247,6 +247,35 @@ class ConvNeXtTinyReg(nn.Module):
         return self.head(f).squeeze(1)                     # logit; the sigmoid lives in src/loss.py
 
 
+class MusiqReg(nn.Module):
+    """MUSIQ (vendored in src/musiq.py, KonIQ or SPAQ weights) with a fresh linear head 384 -> 1.
+    The input is the centred canvas of data.MultiscalePhotos (grey by default).
+    The head returns a logit; the sigmoid lives in src/loss.py. The backbone has
+    no BatchNorm and no dropout, so it needs no train() override.
+    """
+    multiscale = True      # train.py: the input is a canvas with a -1 sentinel, no pixel statistics
+    def __init__(self, prior: float = 0.5, pretrained: bool = True, weights: str = "koniq",
+                 native_max_patches: int = 768):
+        super().__init__()
+        from src.musiq import load_musiq
+        self.backbone = load_musiq(weights, with_head=False, pretrained=pretrained,
+                                   native_max_patches=native_max_patches)
+        self.head = nn.Linear(384, 1)
+        # Kept only for the train.py / checkpoint interface; unused here.
+        self.register_buffer("in_mean", torch.tensor(0.5))
+        self.register_buffer("in_std", torch.tensor(0.25))
+        p = min(max(float(prior), 1e-3), 1 - 1e-3)
+        nn.init.normal_(self.head.weight, std=1e-3)
+        nn.init.constant_(self.head.bias, math.log(p / (1 - p)))
+    def head_parameters(self) -> list[nn.Parameter]:
+        return list(self.head.parameters())
+    def set_backbone_frozen(self, frozen: bool) -> None:
+        for p in self.backbone.parameters():
+            p.requires_grad = not frozen
+        for p in self.head_parameters():
+            p.requires_grad = True
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(self.backbone.features(x)).squeeze(1)
 def build_model(cfg: dict, prior: float = 0.5):
     m = cfg["model"]
     kind = m.get("type", "small_cnn")
@@ -257,6 +286,9 @@ def build_model(cfg: dict, prior: float = 0.5):
         return EfficientNetB0Reg(m.get("dropout", 0.2), prior, m.get("pretrained", True), m.get("pool", "avg"))
     if kind == "convnext_tiny":
         return ConvNeXtTinyReg(m.get("dropout", 0.2), prior, m.get("pretrained", True), m.get("hidden", 256))
+    if kind == "musiq":
+        return MusiqReg(prior, m.get("pretrained", True), m.get("weights", "koniq"),
+                        m.get("native_max_patches", 768))
     raise ValueError(f"unknown model type {kind!r}")
 
 

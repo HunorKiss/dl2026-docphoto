@@ -34,7 +34,7 @@ import numpy as np
 import torch
 
 from src.config import amp_dtype, autocast, device, load_config, seed_everything
-from src.data import TARGET, Photos, cache_path, train_table
+from src.data import TARGET, build_photos, cache_path, train_table
 from src.loss import loss_fn, to_prediction
 from src.model import build_model
 
@@ -46,7 +46,7 @@ def one_batch(cfg: dict, n: int) -> tuple[torch.Tensor, torch.Tensor, float]:
     paths = [cache_path(cfg, "train", i) for i in rows["image_id"]]
     if not paths[0].exists():
         sys.exit(f"{paths[0]} is missing: run python -m src.prepare first")
-    ds = Photos(paths, rows[TARGET], size=cfg["data"]["image_size"])
+    ds = build_photos(cfg, paths, rows[TARGET])
     x, y = zip(*(ds[i] for i in range(n)), strict=True)
     return torch.stack(x), torch.stack(y), float(df[TARGET].mean())
 
