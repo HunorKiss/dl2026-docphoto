@@ -72,8 +72,8 @@ def main() -> None:
                     help="validate with mirror test-time augmentation: every validation photograph is "
                          "predicted as it is and mirrored, and the two predictions are averaged")
     ap.add_argument("--config", default=None)
-    ap.add_argument("--model", default=None, choices=["small_cnn", "effnet_b0"],
-                    help="override the config's model.type (small_cnn | effnet_b0)")
+    ap.add_argument("--model", default=None, choices=["small_cnn", "effnet_b0", "convnext_tiny"],
+                    help="override the config's model.type (small_cnn | effnet_b0 | convnext_tiny)")
     ap.add_argument("--name", default=None, help="override the run name (W&B and output files)")
     ap.add_argument("--seed", type=int, default=None, help="overrides the config's seed")
     ap.add_argument("--out", default="models/reference")
@@ -199,8 +199,22 @@ def main() -> None:
         phases.append((phase, ne, head_lr if (phase == "head" or plain_run) else finetune_lr))
     print("training phases:", [(m, e, f"lr {lr:.1e}") for m, e, lr in phases])
 
-    def make_opt_sched(epochs_left: int, lr: float):
-        o = torch.optim.AdamW(param_groups(model, t["weight_decay"]), lr=lr)
+    # Optional: in "all" phases the head gets its own, larger learning rate,
+    # train.finetune_head_lr, while the backbone trains at finetune_lr (for
+    # example backbone 1e-5, head 1e-4). Without it every parameter of an "all"
+    # phase uses finetune_lr, as before.
+    finetune_head_lr = t.get("finetune_head_lr")
+    if finetune_head_lr is not None:
+        if not hasattr(model, "head_parameters"):
+            raise ValueError(f"train.finetune_head_lr needs a model with a separate head; "
+                             f"{cfg['model'].get('type', 'small_cnn')!r} has none")
+        finetune_head_lr = float(finetune_head_lr)
+        print(f"'all' phases: backbone at finetune_lr {finetune_lr:.1e}, head at finetune_head_lr {finetune_head_lr:.1e}")
+
+    def make_opt_sched(epochs_left: int, lr: float, head_lr_: float | None = None):
+        groups = (param_groups(model, t["weight_decay"], model.head_parameters(), head_lr_) if head_lr_ is not None
+                  else param_groups(model, t["weight_decay"]))
+        o = torch.optim.AdamW(groups, lr=lr)
         tot = max(1, epochs_left) * len(train_dl)
         s = torch.optim.lr_scheduler.LambdaLR(o, lambda step: lr_at(step, tot, t["warmup"]))
         return o, s
@@ -210,8 +224,13 @@ def main() -> None:
         if can_freeze:
             model.set_backbone_frozen(mode == "head")      # "head" -> frozen backbone; "all" -> unfrozen
         n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"  phase '{mode}': {n_epochs} epochs at lr {lr:.1e}, {n_trainable:,} trainable parameters")
-        return make_opt_sched(n_epochs, lr)
+        split_lr = finetune_head_lr if (mode == "all" and not plain_run) else None
+        lr_text = f"lr {lr:.1e}" + (f" (head {split_lr:.1e})" if split_lr is not None else "")
+        print(f"  phase '{mode}': {n_epochs} epochs at {lr_text}, {n_trainable:,} trainable parameters")
+        head_split[0] = split_lr is not None
+        return make_opt_sched(n_epochs, lr, split_lr)
+
+    head_split = [False]    # whether the current phase gives the head its own lr (its groups come last)
 
     # boundaries: the epoch (1-based) at which each phase begins
     phase_start, acc = [], 1
@@ -254,7 +273,8 @@ def main() -> None:
         if val_dl is not None:
             row["val_rmse"] = rmse(va[TARGET], predict(model, val_dl, t["amp"], tta=a.tta))
         log.append(row)
-        tracking.log({**row, "lr": sched.get_last_lr()[0]})
+        lrs = sched.get_last_lr()
+        tracking.log({**row, "lr": lrs[0], **({"lr_head": lrs[-1]} if head_split[0] else {})})
         print("  " + "  ".join(f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}"
                                for k, v in row.items()), flush=True)
 

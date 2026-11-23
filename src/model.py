@@ -140,6 +140,10 @@ class EfficientNetB0Reg(nn.Module):
         nn.init.normal_(self.head.weight, std=1e-3)
         nn.init.constant_(self.head.bias, math.log(p / (1 - p)))
 
+    def head_parameters(self) -> list[nn.Parameter]:
+        """The regression head (and, with pool "avgmax", its max-half scale), for train.finetune_head_lr."""
+        return list(self.backbone.classifier.parameters()) + list(self.pool_norm.parameters())
+
     def set_backbone_frozen(self, frozen: bool) -> None:
         """Freeze or unfreeze every backbone weight; the head always stays trainable."""
         self._backbone_frozen = frozen
@@ -173,6 +177,76 @@ class EfficientNetB0Reg(nn.Module):
         return self.backbone.classifier(f).squeeze(1)    # logit; the sigmoid lives in src/loss.py
 
 
+class ConvNeXtTinyReg(nn.Module):
+    """An ImageNet-pretrained ConvNeXt-Tiny with a small MLP regression head: 768 -> hidden -> 1.
+
+    ConvNeXt is a modernised CNN: a 4 x 4 stride-4 stem, then four stages with
+    7 x 7 depthwise convolutions, LayerNorm and an inverted-bottleneck MLP, each
+    stage halving the resolution. A 768 px page becomes a 768 x 24 x 24 feature
+    map; the network is fully convolutional, so 768 px needs no change to it.
+    It normalises with LayerNorm, not BatchNorm, so it does not depend on the
+    batch size, which at 768 px has to stay small.
+
+    As in EfficientNetB0Reg, the grey 1-channel input is repeated to 3 channels
+    and ImageNet-normalised inside forward(), so data.py and the training loop
+    stay unchanged. The pooled features go through torchvision's own pretrained
+    LayerNorm, then the head: Linear(768, hidden), GELU, Dropout, Linear(hidden, 1).
+    The head returns a logit; the sigmoid is applied in src/loss.py.
+
+    The head (with that LayerNorm) lives outside `self.backbone`, so freezing
+    the backbone never switches the head's dropout off. `head_parameters()`
+    lets train.py give the head its own learning rate (train.finetune_head_lr).
+    """
+
+    def __init__(self, dropout: float = 0.2, prior: float = 0.5, pretrained: bool = True, hidden: int = 256):
+        super().__init__()
+        from torchvision.models import ConvNeXt_Tiny_Weights, convnext_tiny
+        net = convnext_tiny(weights=ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None)
+        self.backbone = net.features                       # stem + 4 stages: (batch, 768, h/32, w/32)
+        self.norm = net.classifier[0]                      # LayerNorm2d(768), pretrained with the backbone
+        width = net.classifier[2].in_features              # 768
+        self.head = nn.Sequential(nn.Linear(width, hidden), nn.GELU(), nn.Dropout(dropout), nn.Linear(hidden, 1))
+
+        m = ConvNeXt_Tiny_Weights.IMAGENET1K_V1.transforms()
+        self.register_buffer("norm_mean", torch.tensor(m.mean).view(1, 3, 1, 1))
+        self.register_buffer("norm_std", torch.tensor(m.std).view(1, 3, 1, 1))
+        # Kept only for checkpoint compatibility with the SmallCNN interface; unused here.
+        self.register_buffer("in_mean", torch.tensor(0.5))
+        self.register_buffer("in_std", torch.tensor(0.25))
+
+        # The last layer starts with tiny weights and its bias at logit(prior):
+        # step 0 predicts the training mean, as in the other models.
+        p = min(max(float(prior), 1e-3), 1 - 1e-3)
+        nn.init.normal_(self.head[-1].weight, std=1e-3)
+        nn.init.constant_(self.head[-1].bias, math.log(p / (1 - p)))
+
+    def head_parameters(self) -> list[nn.Parameter]:
+        """Everything after the backbone: the pretrained LayerNorm and the MLP."""
+        return list(self.norm.parameters()) + list(self.head.parameters())
+
+    def set_backbone_frozen(self, frozen: bool) -> None:
+        """Freeze or unfreeze every backbone weight; the head always stays trainable."""
+        self._backbone_frozen = frozen
+        for p in self.backbone.parameters():
+            p.requires_grad = not frozen
+        for p in self.head_parameters():
+            p.requires_grad = True
+
+    def train(self, mode: bool = True):
+        """While the backbone is frozen it stays in eval mode (no stochastic depth); the head follows `mode`."""
+        super().train(mode)
+        if getattr(self, "_backbone_frozen", False):
+            self.backbone.eval()
+        return self
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.repeat(1, 3, 1, 1)                           # 1 grey channel -> 3
+        x = (x - self.norm_mean) / self.norm_std           # ImageNet normalisation
+        f = self.backbone(x).mean((2, 3), keepdim=True)    # global average pool, as torchvision's avgpool
+        f = self.norm(f).flatten(1)                        # (batch, 768)
+        return self.head(f).squeeze(1)                     # logit; the sigmoid lives in src/loss.py
+
+
 def build_model(cfg: dict, prior: float = 0.5):
     m = cfg["model"]
     kind = m.get("type", "small_cnn")
@@ -181,12 +255,17 @@ def build_model(cfg: dict, prior: float = 0.5):
     if kind == "effnet_b0":
         # model.pool defaults to "avg", so configs and checkpoints from before it existed are unchanged
         return EfficientNetB0Reg(m.get("dropout", 0.2), prior, m.get("pretrained", True), m.get("pool", "avg"))
+    if kind == "convnext_tiny":
+        return ConvNeXtTinyReg(m.get("dropout", 0.2), prior, m.get("pretrained", True), m.get("hidden", 256))
     raise ValueError(f"unknown model type {kind!r}")
 
 
 def load_checkpoint(path: str | Path) -> tuple[nn.Module, dict]:
     ck = torch.load(path, map_location="cpu", weights_only=False)
     cfg = ck["config"]
-    model = build_model(cfg)
+    # The checkpoint holds every weight, so the ImageNet weights need not be
+    # downloaded again just to be overwritten.
+    build_cfg = {**cfg, "model": {**cfg["model"], "pretrained": False}}
+    model = build_model(build_cfg)
     model.load_state_dict(ck["state_dict"])
     return model, cfg
