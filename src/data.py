@@ -115,6 +115,45 @@ class Photos(Dataset):
         return x, y
 
 
+class MultiscalePhotos(Dataset):
+    """Photographs for MUSIQ: the cache image, centred on a float canvas (C, canvas, canvas).
+
+    Valid pixels are in [0, 1]; everything outside the photograph is exactly -1,
+    which is how `src.musiq` finds the photograph's box. C is 1 (grey) or 3
+    (`color`). With `augment`: mirror with probability 1/2 and 0..`max_shift` px
+    removed from each of the four edges (shifts the content and the patch grid,
+    adds no border). Never blur or brightness.
+    """
+
+    def __init__(self, paths, targets=None, canvas: int = 1024, augment: bool = False,
+                 max_shift: int = 16, color: bool = False):
+        self.paths = list(paths)
+        self.targets = None if targets is None else np.asarray(targets, np.float32)
+        self.canvas, self.augment, self.max_shift, self.color = canvas, augment, max_shift, color
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, i: int):
+        if self.color:
+            im = cv2.cvtColor(cv2.imread(str(self.paths[i]), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        else:
+            im = cv2.imread(str(self.paths[i]), cv2.IMREAD_GRAYSCALE)
+        if self.augment:
+            if np.random.rand() < 0.5:
+                im = im[:, ::-1]
+            top, bottom, left, right = np.random.randint(0, self.max_shift + 1, size=4)
+            im = im[top:im.shape[0] - bottom, left:im.shape[1] - right]
+        im = im[..., None] if im.ndim == 2 else im
+        h, w = im.shape[:2]
+        out = np.full((self.canvas, self.canvas, im.shape[2]), -1, np.float32)
+        top, left = (self.canvas - h) // 2, (self.canvas - w) // 2
+        out[top:top + h, left:left + w] = im.astype(np.float32) / 255
+        x = torch.from_numpy(np.ascontiguousarray(out.transpose(2, 0, 1)))
+        y = torch.tensor(self.targets[i]) if self.targets is not None else torch.tensor(float("nan"))
+        return x, y
+
+
 def worker_init(worker_id: int) -> None:
     # each DataLoader worker gets its own numpy stream, derived from torch's seed
     np.random.seed(torch.initial_seed() % 2**32)
