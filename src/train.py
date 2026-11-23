@@ -3,6 +3,7 @@
     python -m src.train --fold 0      # train on folds 1-3, report RMSE on fold 0
     python -m src.train --fold all    # train on every photograph: the model you submit
     python -m src.train --fold 0 --tta   # validate with mirror test-time augmentation
+    python -m src.train --fold all --epochs 12   # override train.epochs of the config
 
 The checkpoints are named after the config file, <config>_fold<k>_seed<s>.pt (see
 src/config.py). To average the four fold models into one submission, use
@@ -73,6 +74,30 @@ class EarlyStopping:
         return self.bad >= self.patience
 
 
+def rescale_phase_epochs(phase_epochs: list[int], n: int) -> list[int]:
+    """Rescale `phase_epochs` proportionally so that they sum to `n` (for --epochs).
+
+    Rounding rule: every phase gets floor(e * n / sum(e)) epochs, but at least 1.
+    Then single epochs are added to the phases furthest below their exact share
+    (largest shortfall first), or removed from the phases furthest above it
+    (only from phases with more than 1 epoch), until the sum is exactly `n`;
+    ties go to the earlier phase. If `n` already equals the sum, nothing changes.
+    """
+    k = len(phase_epochs)
+    if n < k:
+        raise ValueError(f"--epochs {n} is fewer than the {k} phases {phase_epochs}; every phase needs at least 1 epoch")
+    total = sum(phase_epochs)
+    ideal = [e * n / total for e in phase_epochs]
+    out = [max(1, math.floor(x)) for x in ideal]
+    while sum(out) < n:
+        i = max(range(k), key=lambda j: (ideal[j] - out[j], -j))
+        out[i] += 1
+    while sum(out) > n:
+        i = max((j for j in range(k) if out[j] > 1), key=lambda j: (out[j] - ideal[j], -j))
+        out[i] -= 1
+    return out
+
+
 def pixel_stats(ds: Photos, n: int = 200) -> tuple[float, float]:
     """Mean and standard deviation of the pixels of up to `n` training photographs.
 
@@ -96,6 +121,9 @@ def main() -> None:
                     help="override the config's model.type (small_cnn | effnet_b0 | convnext_tiny)")
     ap.add_argument("--name", default=None, help="override the run name (W&B and output files)")
     ap.add_argument("--seed", type=int, default=None, help="overrides the config's seed")
+    ap.add_argument("--epochs", type=int, default=None,
+                    help="overrides the config's train.epochs; the schedule and the phases (phase_epochs "
+                         "rescaled proportionally) are computed from it")
     ap.add_argument("--out", default="models/reference")
     a = ap.parse_args()
 
@@ -108,6 +136,13 @@ def main() -> None:
     if a.model is not None:
         cfg.setdefault("model", {})["type"] = a.model    # command-line choice of network
     d, t = cfg["data"], cfg["train"]
+    if a.epochs is not None:
+        if a.epochs < 1:
+            raise ValueError(f"--epochs must be at least 1, got {a.epochs}")
+        t["epochs"] = a.epochs                       # the schedule is built from this
+        if t.get("phases") is not None and t.get("phase_epochs") is not None:
+            t["phase_epochs"] = rescale_phase_epochs([int(e) for e in t["phase_epochs"]], a.epochs)
+            print(f"--epochs {a.epochs}: phase_epochs rescaled to {t['phase_epochs']}")
     # The run's name ends up in W&B and in every file it writes (checkpoint,
     # log, validation predictions). It is <experiment>_fold<k>_seed<s>, where the
     # experiment is, in order of preference: --name; wandb.experiment in the
