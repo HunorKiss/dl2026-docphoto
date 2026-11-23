@@ -40,7 +40,7 @@ train:
   batch_size: 4
   accum_steps: 2                 # gradients of 2 batches per optimiser step: effective batch 8
   lr: 1.0e-4                     # "head" phases only; unused with phases [all]
-  finetune_lr: 1.0e-5            # the backbone in "all" phases
+  finetune_lr: 1.0e-4            # the backbone in "all" phases
   finetune_head_lr: 1.0e-4       # the head in "all" phases
   weight_decay: 0.05
   warmup: 0.2
