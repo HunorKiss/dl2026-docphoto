@@ -1,0 +1,55 @@
+# ConvNeXt-Tiny, ImageNet-pretrained, on 768 x 768 grey pages, with an MLP
+# regression head 768 -> 256 -> 1 (logit; the sigmoid is in src/loss.py).
+# The whole network trains from the first epoch, with two learning rates at
+# once: the pretrained backbone at 1e-5, the new head at 1e-4 (AdamW).
+#
+#   for k in 0 1 2 3:  python -m src.train --fold k --tta --config configs/convnext_tiny_768_e20.yaml --out models/convnext_tiny_768_e20
+#   python -m src.train --fold all --config configs/convnext_tiny_768_e20.yaml --out models/convnext_tiny_768_e20
+#   python -m src.predict models/convnext_tiny_768_e20/convnext_tiny_768_e20_foldall_seed42.pt --tta --out submissions/convnext_tiny_768_e20_single_all_tta.csv
+#
+# Everything is named after this file: the W&B runs (convnext_tiny_768_e20_fold0_seed42, ...),
+# the checkpoints in models/convnext_tiny_768_e20/ and the submissions.
+#
+# Memory: measured 1.40 GB of activations per 768 px photograph in fp32 plus
+# 0.46 GB of weights, gradients and AdamW state. Batch 4 with fp16 autocast keeps
+# well under the 16 GB of a T4 or P100; gradient accumulation over 2 batches
+# gives the update of batch 8.
+# Loss: Huber on the prediction (train_rmse, val_rmse and the out-of-fold score
+# stay RMSE; train_loss in the log is the Huber value).
+seed: 42
+
+data:
+  raw: data/raw
+  work: data/work/reference      # the 1024 px resize cache of src.prepare
+  cache_size: 1024
+  image_size: 256
+
+split:
+  column: group_strict
+  n_folds: 4
+
+model:
+  type: convnext_tiny
+  hidden: 256                    # the head: 768 -> hidden -> 1
+  dropout: 0.2                   # between the head's two linear layers
+  pretrained: true
+
+train:
+  epochs: 5
+  phases: [all]                  # the whole network from the start (no head-only warm-up)
+  batch_size: 4
+  accum_steps: 2                 # gradients of 2 batches per optimiser step: effective batch 8
+  lr: 1.0e-4                     # "head" phases only; unused with phases [all]
+  finetune_lr: 1.0e-5
+  finetune_head_lr: 1.0e-4       # the head in "all" phases
+  weight_decay: 0.05
+  warmup: 0.2
+  max_shift: 16
+  loss: huber                    # mse | huber
+  huber_delta: 0.1               # quadratic below an error of 0.1, linear above (>= 1 would be plain MSE / 2)
+  amp: fp16                      # float16 autocast + loss scaling on any CUDA GPU (T4, P100); ignored on MPS / CPU
+  early_stopping: 4              # fold runs stop when val_rmse has not improved for 4 epochs; --fold all trains all epochs
+  num_workers: 0
+
+wandb:
+  project: snap-or-retake
