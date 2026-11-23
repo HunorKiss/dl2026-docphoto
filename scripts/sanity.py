@@ -33,7 +33,7 @@ import time
 import numpy as np
 import torch
 
-from src.config import autocast, device, load_config, seed_everything
+from src.config import amp_dtype, autocast, device, load_config, seed_everything
 from src.data import TARGET, Photos, cache_path, train_table
 from src.loss import loss_fn, to_prediction
 from src.model import build_model
@@ -64,13 +64,16 @@ def train_steps(model, x, y, steps: int, lr: float, amp: bool, dev) -> list[floa
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0)
     losses = []
+    # with amp "fp16" the loss is scaled, as in train.py, so small gradients do not underflow
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype(dev, amp) == torch.float16)
     for _ in range(steps):
         with autocast(dev, amp):
             logit = model(x)
         loss = loss_fn(logit, y)
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
+        scaler.scale(loss).backward()
+        scaler.step(opt)
+        scaler.update()
         losses.append(loss.item())
     return losses
 

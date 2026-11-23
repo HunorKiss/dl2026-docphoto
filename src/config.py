@@ -40,14 +40,30 @@ def device() -> torch.device:
     return torch.device("cpu")
 
 
-def autocast(dev: torch.device, enabled: bool = True):
-    """bfloat16 on a CUDA GPU that has it (Ampere and later); full precision everywhere else.
+def amp_dtype(dev: torch.device, amp=True):
+    """The autocast dtype for train.amp, or None for full precision.
 
-    Deliberately not enabled on MPS: bf16 autocast on the Metal backend is
-    unreliable, and plain float32 on MPS is still far faster than emulated CPU.
+      true / "bf16"  bfloat16 on a CUDA GPU that supports it, otherwise full precision
+      "fp16"         float16 on any CUDA GPU (T4, P100, ...); train.py then also uses a
+                     GradScaler, so that small gradients do not underflow to zero
+      false          full precision
+
+    Never on MPS or CPU: autocast on the Metal backend is unreliable, and plain
+    float32 on MPS is still far faster than emulated CPU.
     """
-    on = enabled and dev.type == "cuda" and torch.cuda.is_bf16_supported()
-    return torch.autocast(dev.type, dtype=torch.bfloat16, enabled=on)
+    if amp not in (True, False, "bf16", "fp16"):
+        raise ValueError(f"train.amp must be true, false, 'bf16' or 'fp16', not {amp!r}")
+    if dev.type != "cuda" or amp is False:
+        return None
+    if amp == "fp16":
+        return torch.float16
+    return torch.bfloat16 if torch.cuda.is_bf16_supported() else None
+
+
+def autocast(dev: torch.device, enabled=True):
+    """Mixed precision for one forward pass; `enabled` is train.amp (see amp_dtype)."""
+    dtype = amp_dtype(dev, enabled)
+    return torch.autocast(dev.type, dtype=dtype or torch.bfloat16, enabled=dtype is not None)
 
 
 def experiment_name(cfg: dict, config_path: str | Path | None = None, override: str | None = None) -> str:

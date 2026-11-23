@@ -10,10 +10,12 @@
 # Everything is named after this file: the W&B runs (convnext_tiny_768_fold0_seed42, ...),
 # the checkpoints in models/convnext_tiny_768/ and the submissions.
 #
-# Memory: measured 1.40 GB of activations per 768 px photograph in fp32 (the
-# Kaggle T4 and P100 have no bfloat16, so amp does nothing there) plus 0.46 GB of
-# weights, gradients and AdamW state. Batch 6 needs about 9 GB of the 16 GB;
-# batch 8 would need about 12 GB, too close. If a run still runs out of memory, use 4.
+# Memory: measured 1.40 GB of activations per 768 px photograph in fp32 plus
+# 0.46 GB of weights, gradients and AdamW state. Batch 4 with fp16 autocast keeps
+# well under the 16 GB of a T4 or P100; gradient accumulation over 2 batches
+# gives the update of batch 8.
+# Loss: Huber on the prediction (train_rmse, val_rmse and the out-of-fold score
+# stay RMSE; train_loss in the log is the Huber value).
 seed: 42
 
 data:
@@ -35,14 +37,18 @@ model:
 train:
   epochs: 12
   phases: [all]                  # the whole network from the start (no head-only warm-up)
-  batch_size: 6
+  batch_size: 4
+  accum_steps: 2                 # gradients of 2 batches per optimiser step: effective batch 8
   lr: 1.0e-4                     # "head" phases only; unused with phases [all]
   finetune_lr: 1.0e-5            # the backbone in "all" phases
   finetune_head_lr: 1.0e-4       # the head in "all" phases
   weight_decay: 0.05
   warmup: 0.2
   max_shift: 16
-  amp: true                      # bfloat16 only on GPUs that have it (A100, L4, ...); ignored on T4 / P100
+  loss: huber                    # mse | huber
+  huber_delta: 0.1               # quadratic below an error of 0.1, linear above (>= 1 would be plain MSE / 2)
+  amp: fp16                      # float16 autocast + loss scaling on any CUDA GPU (T4, P100); ignored on MPS / CPU
+  early_stopping: 4              # fold runs stop when val_rmse has not improved for 4 epochs; --fold all trains all epochs
   num_workers: 2                 # Kaggle has 4 CPU cores; use 0 on a Mac (MPS)
 
 wandb:

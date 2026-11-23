@@ -45,12 +45,32 @@ import torch
 from torch.utils.data import DataLoader
 
 from src import tracking
-from src.config import autocast, device, load_config, run_name, seed_everything
+from src.config import amp_dtype, autocast, device, load_config, run_name, seed_everything
 from src.data import TARGET, Photos, assign_folds, cache_path, train_table, worker_init
 from src.evaluate import predict, rmse
-from src.loss import loss_fn
+from src.loss import make_loss, to_prediction
 from src.model import build_model
 from src.optim import lr_at, param_groups
+
+
+class EarlyStopping:
+    """Stop when val_rmse has not improved for `patience` epochs in a row (train.early_stopping).
+
+    The model of the epoch it stops at is kept, as the model of the last epoch
+    is kept without early stopping, never the best one: choosing the epoch on
+    the fold you report would flatter the score (see section 6 below).
+    """
+
+    def __init__(self, patience: int):
+        self.patience, self.best, self.bad = int(patience), float("inf"), 0
+
+    def step(self, val: float) -> bool:
+        """Record one epoch's validation RMSE; True when training should stop."""
+        if val < self.best:
+            self.best, self.bad = val, 0
+        else:
+            self.bad += 1
+        return self.bad >= self.patience
 
 
 def pixel_stats(ds: Photos, n: int = 200) -> tuple[float, float]:
@@ -211,11 +231,26 @@ def main() -> None:
         finetune_head_lr = float(finetune_head_lr)
         print(f"'all' phases: backbone at finetune_lr {finetune_lr:.1e}, head at finetune_head_lr {finetune_head_lr:.1e}")
 
+    # Gradient accumulation (train.accum_steps, default 1): the gradients of
+    # accum_steps batches are summed before one optimiser step, so batch 4 with
+    # accum 2 updates like batch 8 at the memory of batch 4. The schedule counts
+    # optimiser steps, not batches.
+    accum = int(t.get("accum_steps", 1))
+    n_batches = len(train_dl)
+    steps_per_epoch = math.ceil(n_batches / accum)
+    criterion = make_loss(cfg)
+    # float16 needs loss scaling, or small gradients round to zero; with any
+    # other precision the scaler is switched off and does nothing.
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype(dev, t["amp"]) == torch.float16)
+    if accum > 1 or t.get("loss", "mse") != "mse" or scaler.is_enabled():
+        print(f"batch {t['batch_size']} x accum {accum} = {t['batch_size'] * accum} per step | "
+              f"loss {t.get('loss', 'mse')} | fp16 loss scaling {scaler.is_enabled()}")
+
     def make_opt_sched(epochs_left: int, lr: float, head_lr_: float | None = None):
         groups = (param_groups(model, t["weight_decay"], model.head_parameters(), head_lr_) if head_lr_ is not None
                   else param_groups(model, t["weight_decay"]))
         o = torch.optim.AdamW(groups, lr=lr)
-        tot = max(1, epochs_left) * len(train_dl)
+        tot = max(1, epochs_left) * steps_per_epoch
         s = torch.optim.lr_scheduler.LambdaLR(o, lambda step: lr_at(step, tot, t["warmup"]))
         return o, s
 
@@ -242,33 +277,51 @@ def main() -> None:
     opt, sched = apply_phase(*phases[0])
 
     total_epochs = sum(ne for _, ne, _ in phases)   # the real epoch count (phase_epochs may override `epochs`)
+    # Early stopping (train.early_stopping: patience in epochs) needs a
+    # validation fold, so it applies to fold runs only; `--fold all` always
+    # trains every epoch.
+    stopper = EarlyStopping(t["early_stopping"]) if t.get("early_stopping") and val_dl is not None else None
+    stopped_epoch = None
     log = []
     for epoch in range(1, total_epochs + 1):
         if epoch in phase_of_start and epoch != 1:         # a new phase begins this epoch
             opt, sched = apply_phase(*phases[phase_of_start[epoch]])
         model.train()                               # BatchNorm uses batch statistics
-        start, losses = time.time(), []
-        for x, y in train_dl:
+        start, losses, sq_err, seen = time.time(), [], 0.0, 0
+        opt.zero_grad(set_to_none=True)
+        for i, (x, y) in enumerate(train_dl):
             x, y = x.to(dev, non_blocking=nb), y.to(dev, non_blocking=nb)
-            # The forward pass in bfloat16 where the GPU supports it (faster,
-            # half the memory); the loss in full precision.
+            # The forward pass in reduced precision where train.amp asks for it
+            # and the GPU supports it (faster, half the memory); the loss in full precision.
             with autocast(dev, t["amp"]):
                 logit = model(x)
-            # MSE on the sigmoid of the logit (src/loss.py): the prediction
-            # stays in [0, 1] like the label, the loss is the square of the metric.
-            loss = loss_fn(logit, y)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            # Clipping the gradient norm at 1 stops a single bad batch from
-            # making a huge step; in a normal step it does nothing.
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            sched.step()
+            # The loss is computed on the sigmoid of the logit (src/loss.py): the
+            # prediction stays in [0, 1] like the label.
+            loss = criterion(logit, y)
+            # Each batch of an accumulation group contributes its share, so the
+            # summed gradient is that of the group's mean loss (the last group
+            # of an epoch may be shorter).
+            group = min(accum, n_batches - (i // accum) * accum)
+            scaler.scale(loss / group).backward()
+            if (i + 1) % accum == 0 or i + 1 == n_batches:
+                # Clipping the gradient norm at 1 stops a single bad batch from
+                # making a huge step; in a normal step it does nothing. With
+                # fp16 the gradients are unscaled first, so the clip sees their true size.
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(opt)
+                scaler.update()
+                sched.step()
+                opt.zero_grad(set_to_none=True)
             losses.append(loss.item())
+            with torch.no_grad():
+                sq_err += float(((to_prediction(logit) - y) ** 2).sum())
+                seen += len(y)
         # train_rmse is measured on augmented photographs while the weights were
         # still changing, so it is only a rough guide; val_rmse (fold runs) is
         # computed after the epoch on every photograph of the held-out fold.
-        row = {"epoch": epoch, "train_rmse": math.sqrt(np.mean(losses)),
+        # train_loss is the training loss itself (with MSE: train_rmse squared).
+        row = {"epoch": epoch, "train_rmse": math.sqrt(sq_err / seen), "train_loss": float(np.mean(losses)),
                "seconds": round(time.time() - start)}
         if val_dl is not None:
             row["val_rmse"] = rmse(va[TARGET], predict(model, val_dl, t["amp"], tta=a.tta))
@@ -277,6 +330,11 @@ def main() -> None:
         tracking.log({**row, "lr": lrs[0], **({"lr_head": lrs[-1]} if head_split[0] else {})})
         print("  " + "  ".join(f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}"
                                for k, v in row.items()), flush=True)
+        if stopper is not None and stopper.step(row["val_rmse"]):
+            stopped_epoch = epoch
+            print(f"  early stopping: val_rmse has not improved for {stopper.patience} epochs "
+                  f"(best {stopper.best:.4f}); keeping the model of epoch {epoch}")
+            break
 
     # --- 6. Outputs. The model after the last epoch is kept, never the epoch
     # with the best validation score: picking the best epoch on the fold you
@@ -301,7 +359,8 @@ def main() -> None:
         # lab 3). The per-epoch val_rmse above counts them all, so the two
         # differ slightly.
         ok = res["eval_ok"] == 1
-        summary = {"val_rmse_eval_ok": rmse(res.loc[ok, TARGET], res.loc[ok, "pred"]), "n_eval_ok": int(ok.sum())}
+        summary = {"val_rmse_eval_ok": rmse(res.loc[ok, TARGET], res.loc[ok, "pred"]), "n_eval_ok": int(ok.sum()),
+                   "epochs_trained": len(log), **({"stopped_epoch": stopped_epoch} if stopped_epoch else {})}
         print(f"{name}: validation RMSE {summary['val_rmse_eval_ok']:.4f} "
               f"on {summary['n_eval_ok']} photographs (eval_ok){', mirror TTA' if a.tta else ''}")
     tracking.finish(summary)
